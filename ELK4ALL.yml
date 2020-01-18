@@ -1,0 +1,548 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Just add IPs allowed to access Logstash and Kibana, leave rest as default and it will work. Creates a working ELK stack with just a minimum of configurations applyed. OBS! DO NOT USE IN PRODUCTION BEFORE SECURED PROPERLY!
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: ELKSOCCluster
+    Description: A name for the Cluster where our containers are hosted.
+  LogstashContainerName:
+    Type: String
+    Default: LogstashContainer  
+    Description: A name for the container.
+  ElasticsearchContainerName:
+    Type: String
+    Default: ElasticsearchContainer  
+    Description: A name for the container.
+  KibanaContainerName:
+    Type: String
+    Default: KibanaContainer  
+    Description: A name for the container.
+  LogstashDesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the Task to run.
+  ElasticsearchDesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the Task to run.
+  KibanaDesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the Task to run.
+  LogstashServiceName:
+    Type: String
+    Default: LogstashService
+    Description: A name for the service that starts/stops new and existing Logstash Tasks, and ensures that we allways have the DesiredCount of containers running.
+  ElasticsearchServiceName:
+    Type: String
+    Default: ElasticsearchService
+    Description: A name for the service that starts/stops new and existing Logstash Tasks, and ensures that we allways have the DesiredCount of containers running.
+  KibanaServiceName:
+    Type: String
+    Default: KibanaService
+    Description: A name for the service that starts/stops new and existing Logstash Tasks, and ensures that we allways have the DesiredCount of containers running.
+  LogstashImageUrl:
+    Type: String
+    Default: kalledania/elk-logstash:latest
+    Description: The url of our custom Logstash docker image.
+  ElasticsearchImageUrl:
+    Type: String
+    Default: kalledania/elk-elasticsearch:latest
+    Description: The url of our custom Elasticsearch docker image.
+  KibanaImageUrl:
+    Type: String
+    Default: kalledania/elk-kibana:latest
+    Description: The url of our custom Kibana docker image.
+  LogstashInputPort:
+    Type: Number
+    Default: 514
+    Description: What port number the application inside the docker container is binding to. 514 is Syslog default port.
+  ElasticsearchPort:
+    Type: Number
+    Default: 9200
+    Description: What port number the application inside the docker container is binding to. 9200 is default port.
+  KibanaPort:
+    Type: Number
+    Default: 5601
+    Description:  What port number the application inside the docker container is binding to. 5601 is default port.
+  LogstashContainerCPU:
+    Type: String
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU.
+  ElasticsearchContainerCPU:
+    Type: String
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU.
+  KibanaContainerCPU:
+    Type: String
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU.
+  LogstashContainerMemory:
+    Type: Number
+    Default: 2048
+    Description: How much memory in megabytes to give the container. I recommend not going lower than 1024, as 512 occationally experienced out-of-memory errors on container start-up.
+  ElasticsearchContainerMemory:
+    Type: Number
+    Default: 2048
+    Description: "Note: Runs out of memory at 1024."
+  KibanaContainerMemory:
+    Type: Number
+    Default: 2048
+    Description: KibanaContainerMemory
+  VPCCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+  PublicSubnet1Range:
+    Type: String
+    Default: 10.0.1.0/24
+  PublicSubnet2Range:
+    Type: String
+    Default: 10.0.2.0/24
+  LogstashContainerAllowInboundIPs: 
+    Type: String
+    Description: Container-level ACL. Find ur current IP with https://whatismyipaddress.com/.
+  KibanaContainerAllowInboundIPs: 
+    Type: String
+    Description: Container-level ACL. Find ur current IP with https://whatismyipaddress.com/.
+  LogstashAssignPublicIP:
+    Type: String
+    Default: ENABLED
+    Description: A public IP for the Task(container). Is required for external devices to be able to ship logs to it.
+  KibanaAssignPublicIP:
+    Type: String
+    Default: ENABLED
+    Description: A public IP for the Task(container). Is required for external devices to be able to ship logs to it. 
+  ElasticsearchServiceDiscoveryNamespaceName: 
+    Type: String 
+    Default: elksoc.com
+    Description: "The namespace for our Service Discovery service that contains our discoverable services"
+  ElasticsearchServiceDiscoveryServiceName: 
+    Type: String 
+    Default: ServiceDiscoveryServiceElasticsearch
+    Description: "The discoverable name of our Elasticsearch container"
+
+Resources:
+    # The Virtual Private Cloud where our Container Cluster is residing. It comes with 2 subnets in different AvailabilityZones, 
+    # so we can failover to the not-currently-used AZ, in case the used one experience breakdowns or the likes. 
+    ELKSOCKVPC:
+      Type: AWS::EC2::VPC
+      Properties: 
+        CidrBlock: !Ref VPCCIDR
+        EnableDnsHostnames: "true"
+        EnableDnsSupport: "true"
+        InstanceTenancy: "default"
+    
+    PublicSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties: 
+        CidrBlock: !Ref PublicSubnet1Range
+        MapPublicIpOnLaunch: "true"
+        VpcId: !Ref ELKSOCKVPC
+   
+    PublicSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties: 
+        CidrBlock: !Ref PublicSubnet2Range
+        MapPublicIpOnLaunch: "true"
+        VpcId: !Ref ELKSOCKVPC
+   
+    VPCInternetGateway:
+      Type: AWS::EC2::InternetGateway
+   
+    VPCInternetGatewayAttachAction:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties: 
+        InternetGatewayId: !Ref VPCInternetGateway  
+        VpcId:  !Ref ELKSOCKVPC
+
+    RouteTableAssociation1:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet1
+        RouteTableId: !Ref MainRouteTable 
+   
+    RouteTableAssociation2:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet2
+        RouteTableId: !Ref MainRouteTable
+   
+    MainRouteTable:                        
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref ELKSOCKVPC
+    
+    # The route 0.0.0.0/0 is required to be able route public/external traffic to our VPC.  
+    ELKSOCKVPCInternetGatewayRoute:
+      Type: AWS::EC2::Route
+      Properties: 
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId:  !Ref VPCInternetGateway
+        RouteTableId: !Ref MainRouteTable
+    
+    Cluster:
+      Type: AWS::ECS::Cluster
+      Properties: 
+        ClusterName:  !Join
+          - "-"
+          - -  !Ref ClusterName 
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+    
+    # LogGroup is needed to be able to monitor the containers logs from AWS Console.    
+    LogstashContainerLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName:  !Join
+          - "-"
+          - -  !Ref LogstashServiceName
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+                  
+    # LogGroup is needed to be able to monitor the containers logs from AWS Console.    
+    ElasticsearchContainerLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName:  !Join
+          - "-"
+          - -  !Ref ElasticsearchServiceName
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+
+    # LogGroup is needed to be able to monitor the containers logs from AWS Console.    
+    KibanaContainerLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName:  !Join
+          - "-"
+          - -  !Ref KibanaServiceName
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+    
+    # The policy we use to create our Task(container). Is needed to be able to fetch external Docker images, aswell as setup the AWS dependencies required for the Task.
+    PolicyECSExecution:
+      Type: AWS::IAM::ManagedPolicy
+      Properties: 
+        ManagedPolicyName: !Join
+          - "-"
+          - -  "PolicyECSExecution" 
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement: 
+          -
+            Effect: "Allow"
+            Action: 
+            - ecr:GetAuthorizationToken
+            - ecr:BatchCheckLayerAvailability
+            - ecr:GetDownloadUrlForLayer
+            - ecr:BatchGetImage
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
+    
+
+    # The Role that has above policy attached. This role will later be assumed to allow creation of our Task(container).
+    RoleECSExecution:
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument: 
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: "Allow"
+              Principal: 
+                Service: 
+                  - "ecs-tasks.amazonaws.com"
+              Action: "sts:AssumeRole"
+        ManagedPolicyArns: 
+          - !Ref PolicyECSExecution
+        RoleName:   !Join
+          - "-"
+          - -  "RoleECSExecution"
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+    
+    # A TaskDefinition is basicly the Container recipe. I used Environment Variables to add parameters to the Logstash.conf file dynamicly.
+    LogstashTaskDef:
+      Type: AWS::ECS::TaskDefinition
+      Properties: 
+        #This networkmode is required by Fargate tasks.
+        NetworkMode: awsvpc  
+        RequiresCompatibilities: 
+          - FARGATE
+        Cpu: !Ref LogstashContainerCPU
+        Memory: !Ref LogstashContainerMemory  
+        ExecutionRoleArn: !Ref RoleECSExecution                                      
+        ContainerDefinitions: 
+          -
+            Name: !Ref LogstashContainerName 
+            Image: !Ref LogstashImageUrl
+            PortMappings:
+              - 
+                ContainerPort: !Ref LogstashInputPort
+                HostPort: !Ref LogstashInputPort
+                Protocol: udp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-region: !Ref AWS::Region
+                awslogs-group: !Ref LogstashContainerLogGroup
+                awslogs-stream-prefix: ecs
+            Environment:
+              - Name: SYSLOG_INPUT_PORT
+                Value: !Ref LogstashInputPort
+              - Name: ELASTICSEARCH_HOST_AND_PORT
+                Value:  !Join [ "", [ "http://", !Ref ElasticsearchServiceDiscoveryServiceName, ".", !Ref ElasticsearchServiceDiscoveryNamespaceName ,":", !Ref ElasticsearchPort ] ] 
+
+     # A TaskDefinition is basicly the Container recipe. 
+    ElasticsearchTaskDef:
+      Type: AWS::ECS::TaskDefinition
+      Properties: 
+        NetworkMode: awsvpc
+        RequiresCompatibilities: 
+          - FARGATE
+        Cpu: !Ref ElasticsearchContainerCPU
+        Memory: !Ref ElasticsearchContainerMemory  
+        ExecutionRoleArn: !Ref RoleECSExecution                                      
+        ContainerDefinitions: 
+          -
+            Name: !Ref ElasticsearchContainerName 
+            Image: !Ref ElasticsearchImageUrl 
+            PortMappings:
+              - ContainerPort: !Ref ElasticsearchPort
+                HostPort: !Ref ElasticsearchPort
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-region: !Ref AWS::Region
+                awslogs-group: !Ref ElasticsearchContainerLogGroup
+                awslogs-stream-prefix: ecs
+
+    # A TaskDefinition is basicly the Container recipe.
+    KibanaTaskDef:
+      Type: AWS::ECS::TaskDefinition
+      Properties: 
+        NetworkMode: awsvpc
+        RequiresCompatibilities: 
+          - FARGATE
+        Cpu: !Ref KibanaContainerCPU
+        Memory: !Ref KibanaContainerMemory  
+        ExecutionRoleArn: !Ref RoleECSExecution                                      
+        ContainerDefinitions: 
+          -
+            Name: !Ref KibanaContainerName 
+            Image: !Ref KibanaImageUrl 
+            PortMappings:
+              - 
+                ContainerPort: !Ref KibanaPort
+                HostPort: !Ref KibanaPort
+                Protocol: tcp
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-region: !Ref AWS::Region
+                awslogs-group: !Ref KibanaContainerLogGroup
+                awslogs-stream-prefix: ecs
+            Environment:
+              - Name: ELASTICSEARCH_HOSTS
+                Value: !Join [ "", [ "http://",  !Ref ElasticsearchServiceDiscoveryServiceName, ".", !Ref ElasticsearchServiceDiscoveryNamespaceName ,":", !Ref ElasticsearchPort ] ] 
+
+    # The Container-level ACL.
+    LogstashContainerSecurityGroup:                                     
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: The SecurityGroup that will protect the Task/container.
+        GroupName: LogstashContainerSecurityGroup
+        VpcId: !Ref ELKSOCKVPC
+        # These rules allows all traffic.
+        SecurityGroupIngress: 
+            IpProtocol: -1
+            CidrIp:  0.0.0.0/0
+        SecurityGroupEgress: 
+          IpProtocol: -1
+          CidrIp:  0.0.0.0/0
+
+    # The host/Container-level Firewall.                                            
+    ElasticsearchContainerSecurityGroup:                                     
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: The SecurityGroup that will protect the Task/container.
+        GroupName: ElasticsearchContainerSecurityGroup
+        VpcId: !Ref ELKSOCKVPC
+        # These rules allows all traffic.
+        SecurityGroupIngress: 
+            IpProtocol: -1
+            CidrIp:  0.0.0.0/0
+        SecurityGroupEgress: 
+          IpProtocol: -1
+          CidrIp:  0.0.0.0/0
+
+
+    KibanaContainerSecurityGroup:                                     
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: The SecurityGroup that will protect the Task/container.
+        VpcId: !Ref ELKSOCKVPC
+        # These rules allows all traffic.
+        SecurityGroupIngress: 
+            IpProtocol: -1
+            CidrIp:  0.0.0.0/0
+        SecurityGroupEgress: 
+          IpProtocol: -1
+          CidrIp:  0.0.0.0/0
+
+    ServiceDiscoveryNamespace:
+      Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+      Properties: 
+        Description: "Service Discovery namespace for our ELK stack(Used for: Logstash push to Elasticsearch, Kibana fetch from Elasticsearch)"
+        Name: !Ref ElasticsearchServiceDiscoveryNamespaceName 
+        Vpc: !Ref ELKSOCKVPC
+
+    ServiceDiscoveryServiceElasticsearch: 
+      Type: 'AWS::ServiceDiscovery::Service'
+      Properties:
+        Description: Service based on a public DNS namespace
+        DnsConfig:
+          DnsRecords:
+            # The value for an A record is an IPv4 address in dotted decimal notation.  <Value>192.0.2.1</Value>
+            - Type: A 
+              TTL: 60
+        Name: !Ref ElasticsearchServiceDiscoveryServiceName
+        NamespaceId: !Ref ServiceDiscoveryNamespace 
+
+    # The service that starts/stops new and existing Logstash Tasks, which ensures that we allways have the DesiredCount of containers running.
+    LogstashService:
+      Type: AWS::ECS::Service
+      Properties: 
+        ServiceName:  !Join
+          - "-"
+          - -  !Ref LogstashServiceName 
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+        Cluster: !Ref Cluster
+        TaskDefinition: !Ref LogstashTaskDef
+        DesiredCount: !Ref LogstashDesiredCount
+        LaunchType: FARGATE
+        NetworkConfiguration: 
+          AwsvpcConfiguration:
+            AssignPublicIp: !Ref LogstashAssignPublicIP
+            Subnets:
+              - !Ref PublicSubnet1
+              - !Ref PublicSubnet2
+            SecurityGroups:
+              - !Ref LogstashContainerSecurityGroup
+
+    # The service that starts/stops new and existing  Elasticsearch Tasks, which ensures that we allways have the DesiredCount of containers running.
+    ElasticsearchService:
+      Type: AWS::ECS::Service
+      DependsOn: ServiceDiscoveryServiceElasticsearch
+      Properties: 
+        ServiceName:  !Join
+          - "-"
+          - -  !Ref ElasticsearchServiceName 
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+        Cluster: !Ref Cluster
+        ServiceRegistries: 
+        - RegistryArn: !GetAtt ServiceDiscoveryServiceElasticsearch.Arn
+          ContainerName: !Ref ElasticsearchContainerName
+        TaskDefinition: !Ref ElasticsearchTaskDef
+        DesiredCount: !Ref ElasticsearchDesiredCount
+        LaunchType: FARGATE
+        NetworkConfiguration: 
+          AwsvpcConfiguration:
+            AssignPublicIp: ENABLED 
+            Subnets:
+              - !Ref PublicSubnet1
+              - !Ref PublicSubnet2
+            SecurityGroups:
+              - !Ref ElasticsearchContainerSecurityGroup
+
+    # The service that starts/stops new and existing Kibana Tasks, which ensures that we allways have the DesiredCount of containers running.
+    KibanaService:
+      Type: AWS::ECS::Service
+      Properties: 
+        ServiceName:  !Join
+          - "-"
+          - -  !Ref KibanaServiceName 
+            - !Select
+              - 0
+              - !Split
+                - "-"
+                - !Select
+                  - 2
+                  - !Split
+                    - "/"
+                    - !Ref "AWS::StackId"
+        Cluster: !Ref Cluster
+        TaskDefinition: !Ref KibanaTaskDef
+        DesiredCount: !Ref KibanaDesiredCount
+        LaunchType: FARGATE
+        NetworkConfiguration: 
+          AwsvpcConfiguration:
+            AssignPublicIp: !Ref KibanaAssignPublicIP
+            Subnets:
+              - !Ref PublicSubnet1
+              - !Ref PublicSubnet2
+            SecurityGroups:
+              - !Ref KibanaContainerSecurityGroup
